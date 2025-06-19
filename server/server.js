@@ -1,5 +1,5 @@
 const express = require('express');
-const https = require('https');
+const http = require('http');
 const fs = require('fs');
 const socketIO = require('socket.io');
 const multer = require('multer');
@@ -8,14 +8,14 @@ const { authRoutes, authenticateToken } = require('./auth');
 const cors = require('cors');
 
 const app = express();
-const serverOptions = {
-  key: fs.readFileSync(path.join(__dirname, 'cert/server.key')),
-  cert: fs.readFileSync(path.join(__dirname, 'cert/server.cert')),
-};
-const server = https.createServer(serverOptions, app);
+// const serverOptions = {
+//   key: fs.readFileSync(path.join(__dirname, 'cert/server.key')),
+//   cert: fs.readFileSync(path.join(__dirname, 'cert/server.cert')),
+// };
+const server = http.createServer(serverOptions, app);
 const io = socketIO(server, { cors: { origin: '*' } });
 
-// Middleware
+//Application of middlewares used
 app.use(express.json());
 app.use(cors());
 app.use(express.static(path.join(__dirname, '../client')));
