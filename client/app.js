@@ -9,7 +9,7 @@ let isDrawing = false;
 
 // Generate a random room ID
 function generateRoomId() {
-    return 'room-' + Math.random().toString(36).substr(2, 8); // e.g., room-abc12345
+    return 'room-' + Math.random().toString(36).substr(2, 8); 
 }
 
 // Handle room creation

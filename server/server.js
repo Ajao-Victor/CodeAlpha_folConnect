@@ -1,5 +1,5 @@
 const express = require('express');
-const http = require('http');
+const https = require('https');
 const fs = require('fs');
 const socketIO = require('socket.io');
 const multer = require('multer');
@@ -8,14 +8,13 @@ const { authRoutes, authenticateToken } = require('./auth');
 const cors = require('cors');
 
 const app = express();
-// const serverOptions = {
-//   key: fs.readFileSync(path.join(__dirname, 'cert/server.key')),
-//   cert: fs.readFileSync(path.join(__dirname, 'cert/server.cert')),
-// };
-const server = http.createServer(serverOptions, app);
+const serverOptions = {
+  key: fs.readFileSync(path.join(__dirname, 'cert/server.key')),
+  cert: fs.readFileSync(path.join(__dirname, 'cert/server.cert')),
+};
+const server = https.createServer(serverOptions, app);
 const io = socketIO(server, { cors: { origin: '*' } });
 
-//Application of middlewares used
 app.use(express.json());
 app.use(cors());
 app.use(express.static(path.join(__dirname, '../client')));
@@ -36,7 +35,7 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
-// Socket.IO Logic path
+// Socket.IO Logic path in the server
 const rooms = new Map();
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
