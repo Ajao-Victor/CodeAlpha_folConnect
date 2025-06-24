@@ -15,10 +15,18 @@ const app = express();
 const server = http.createServer( app);
 const io = socketIO(server, { cors: { origin: '*' } });
 
+// repair 19-23
+const fs = require('fs');
+const uploadDir = path.join(__dirname, 'Uploads');
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
+
 app.use(express.json());
 app.use(cors());
 app.use(express.static(path.join(__dirname, '../client')));
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+// repair to update uploads to uploadDir
+app.use('/uploads', express.static(path.join(__dirname, 'uploaddir')));
 
 
 app.use('/auth', authRoutes);
@@ -26,9 +34,9 @@ app.get('/room/:roomId', (req, res) => {
     res.sendFile(path.join(__dirname, '../client/index.html'));
 });
 
-// File Upload Setup
+// File Upload Setup... changed uploads to uplohadDir
 const storage = multer.diskStorage({
-  destination: './Uploads/',
+  destination: './UploadDir/',
   filename: (req, file, cb) => {
     cb(null, `${Date.now()}-${file.originalname}`);
   },
@@ -102,9 +110,18 @@ io.on('connection', (socket) => {
 });
 
 // File Upload Route
+// app.post('/upload', authenticateToken, upload.single('file'), async (req, res) => {
+//   try {
+//     const fileUrl = `/uploads/${req.file.filename}`;
+//     res.json({ fileUrl, fileName: req.file.originalname });
+//   } catch (err) {
+//     console.error('File upload error:', err);
+//     res.status(500).json({ error: 'Failed to upload file' });
+//   }
+// });
 app.post('/upload', authenticateToken, upload.single('file'), async (req, res) => {
   try {
-    const fileUrl = `/uploads/${req.file.filename}`;
+    const fileUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
     res.json({ fileUrl, fileName: req.file.originalname });
   } catch (err) {
     console.error('File upload error:', err);
