@@ -359,7 +359,7 @@
 //     filesContainer.appendChild(fileItem);
 // }
 
-const socket = io(process.env.BACKEND_URL || 'https://folconnect-backend.onrender.com');
+const socket = io(process.env.BACKEND_URL || 'https://folconnect.onrender.com');
 let localStream;
 let peers = {};
 let userId = null;
