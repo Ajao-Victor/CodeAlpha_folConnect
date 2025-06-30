@@ -39,7 +39,7 @@ window.addEventListener('load', () => {
   if (path.startsWith('/room/')) {
     const roomId = path.split('/room/')[1];
     document.getElementById('room-id').value = roomId;
-    document.getElementById('generated-room-id').textContent = sessionStorage.getItem('roomId') || roomId;
+    document.getElementById('generated-room-id').textContent = roomId;
     document.getElementById('room-id-display').style.display = 'block';
   }
 });
@@ -156,6 +156,7 @@ function createPeerConnection(peerId, roomId) {
       { urls: 'stun:stun1.l.google.com:19302' },
     ],
   });
+  pc.peerId = peerId; // Store peerId for re-negotiation
   peers[peerId] = pc;
 
   // Buffer ICE candidates
@@ -230,8 +231,9 @@ function removeVideoStream(peerId) {
   console.log(`Removed video stream for ${peerId}`);
 }
 
-// Store usernames from user-joined event
+// Store usernames and buffered offers
 const usernames = new Map();
+const bufferedOffers = new Map();
 socket.on('user-joined', ({ userId: peerId, socketId, username: peerName }) => {
   if (socketId !== socket.id) {
     usernames.set(socketId, peerName);
@@ -253,6 +255,23 @@ socket.on('offer', async ({ offer, from, roomId }) => {
     } catch (err) {
       console.error('Offer handling error:', err);
     }
+  } else if (pc.signalingState === 'have-local-offer') {
+    console.log(`Offer collision from ${from}, buffering offer`);
+    bufferedOffers.set(from, { offer, roomId });
+    // Prioritize based on socket.id
+    if (socket.id < from) {
+      console.log(`Rolling back offer for ${from} as ${socket.id} has priority`);
+      try {
+        await pc.setLocalDescription(new RTCSessionDescription({ type: 'rollback' }));
+        await pc.setRemoteDescription(new RTCSessionDescription(offer));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        console.log(`Sending answer to ${from} after rollback, signalingState: ${pc.signalingState}`);
+        socket.emit('answer', { answer, to: from, from: socket.id });
+      } catch (err) {
+        console.error('Rollback error:', err);
+      }
+    }
   } else {
     console.log(`Ignoring offer from ${from}, invalid signalingState: ${pc.signalingState}`);
   }
@@ -264,6 +283,16 @@ socket.on('answer', async ({ answer, from }) => {
     try {
       console.log(`Received answer from ${from}, signalingState: ${pc.signalingState}`);
       await pc.setRemoteDescription(new RTCSessionDescription(answer));
+      // Retry buffered offer if exists
+      if (bufferedOffers.has(from)) {
+        const { offer, roomId } = bufferedOffers.get(from);
+        console.log(`Retrying buffered offer from ${from}`);
+        await pc.setRemoteDescription(new RTCSessionDescription(offer));
+        const newAnswer = await pc.createAnswer();
+        await pc.setLocalDescription(newAnswer);
+        socket.emit('answer', { answer: newAnswer, to: from, from: socket.id });
+        bufferedOffers.delete(from);
+      }
     } catch (err) {
       console.error('Answer handling error:', err);
     }
@@ -293,6 +322,7 @@ socket.on('user-left', ({ userId: peerId }) => {
     delete peers[peerId];
   }
   usernames.delete(peerId);
+  bufferedOffers.delete(peerId);
   console.log(`User ${peerId} left`);
 });
 
@@ -331,17 +361,20 @@ document.getElementById('video-toggle').addEventListener('click', () => {
   document.getElementById('video-toggle').classList.toggle('disabled');
   socket.emit('toggle-video', { userId: socket.id, enabled: !enabled, roomId: document.getElementById('room-id').value });
   console.log(`Video toggle: ${!enabled}`);
-  // Trigger re-negotiation
-  Object.values(peers).forEach(async pc => {
-    if (pc.signalingState === 'stable') {
-      try {
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        socket.emit('offer', { offer: pc.localDescription, to: pc.peerId, from: socket.id, roomId: document.getElementById('room-id').value });
-        console.log(`Sent re-negotiation offer for ${pc.peerId}`);
-      } catch (err) {
-        console.error('Re-negotiation error:', err);
-      }
+  // Re-add tracks and trigger re-negotiation
+  Object.values(peers).forEach(pc => {
+    if (localStream && pc.signalingState === 'stable') {
+      localStream.getTracks().forEach(track => {
+        pc.addTrack(track, localStream);
+        console.log(`Re-added track: ${track.kind} for ${pc.peerId}`);
+      });
+      pc.createOffer()
+        .then(offer => pc.setLocalDescription(offer))
+        .then(() => {
+          socket.emit('offer', { offer: pc.localDescription, to: pc.peerId, from: socket.id, roomId: document.getElementById('room-id').value });
+          console.log(`Sent re-negotiation offer for ${pc.peerId}`);
+        })
+        .catch(err => console.error('Re-negotiation error:', err));
     }
   });
 });
@@ -427,6 +460,7 @@ whiteboard.addEventListener('mousemove', (e) => {
   }
 });
 
+
 whiteboard.addEventListener('mouseup', () => {
   isDrawing = false;
   ctx.currentX = null;
@@ -496,6 +530,8 @@ function addFile(fileName, fileUrl, userName) {
 // Debug Socket.IO connection
 socket.on('connect', () => console.log('Socket.IO connected'));
 socket.on('connect_error', (err) => console.error('Socket.IO error:', err));
+
+
 
 // const socket = io();
 // let localStream;
