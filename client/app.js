@@ -39,7 +39,7 @@ window.addEventListener('load', () => {
   if (path.startsWith('/room/')) {
     const roomId = path.split('/room/')[1];
     document.getElementById('room-id').value = roomId;
-    document.getElementById('generated-room-id').textContent = roomId;
+    document.getElementById('generated-room-id').textContent = sessionStorage.getItem('roomId') || roomId;
     document.getElementById('room-id-display').style.display = 'block';
   }
 });
@@ -110,6 +110,7 @@ async function joinRoom() {
   if (!token) return alert('Please sign in to join a room');
   try {
     localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    console.log('Local stream tracks:', localStream.getTracks());
     addVideoStream(socket.id, username, localStream, true);
     socket.emit('join-room', { roomId, userId: socket.id, username }, ({ users, error }) => {
       if (error) return alert(error);
@@ -144,7 +145,7 @@ function addVideoStream(peerId, peerName, stream, isLocal = false) {
   }
   const video = wrapper.querySelector('video');
   video.srcObject = stream;
-  console.log(`Added video stream for ${peerName} (${peerId}), isLocal: ${isLocal}, stream:`, stream);
+  console.log(`Added video stream for ${peerName} (${peerId}), isLocal: ${isLocal}, stream active: ${stream?.active}, tracks:`, stream?.getTracks());
 }
 
 function createPeerConnection(peerId, roomId) {
@@ -157,7 +158,7 @@ function createPeerConnection(peerId, roomId) {
   });
   peers[peerId] = pc;
 
-  // Buffer ICE candidates until remote description is set
+  // Buffer ICE candidates
   const iceCandidates = [];
   pc.onicecandidate = (event) => {
     if (event.candidate) {
@@ -191,13 +192,17 @@ function createPeerConnection(peerId, roomId) {
   };
 
   pc.onnegotiationneeded = async () => {
-    try {
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      console.log(`Sending offer to ${peerId}`);
-      socket.emit('offer', { offer: pc.localDescription, to: peerId, from: socket.id, roomId });
-    } catch (err) {
-      console.error('Negotiation error:', err);
+    if (pc.signalingState === 'stable') {
+      try {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        console.log(`Sending offer to ${peerId}, signalingState: ${pc.signalingState}`);
+        socket.emit('offer', { offer: pc.localDescription, to: peerId, from: socket.id, roomId });
+      } catch (err) {
+        console.error('Negotiation error:', err);
+      }
+    } else {
+      console.log(`Skipping offer for ${peerId}, signalingState: ${pc.signalingState}`);
     }
   };
 
@@ -207,15 +212,13 @@ function createPeerConnection(peerId, roomId) {
       removeVideoStream(peerId);
       delete peers[peerId];
     }
-  };
-
-  // Apply buffered ICE candidates after setting remote description
-  pc.onremotedescription = () => {
-    iceCandidates.forEach(candidate => {
-      socket.emit('ice-candidate', { candidate, to: peerId });
-      console.log(`Sent buffered ICE candidate to ${peerId}`);
-    });
-    iceCandidates.length = 0;
+    if (pc.iceConnectionState === 'connected') {
+      iceCandidates.forEach(candidate => {
+        socket.emit('ice-candidate', { candidate, to: peerId });
+        console.log(`Sent buffered ICE candidate to ${peerId}`);
+      });
+      iceCandidates.length = 0;
+    }
   };
 
   return pc;
@@ -238,40 +241,48 @@ socket.on('user-joined', ({ userId: peerId, socketId, username: peerName }) => {
 });
 
 socket.on('offer', async ({ offer, from, roomId }) => {
-  console.log(`Received offer from ${from}`);
+  console.log(`Received offer from ${from}, signalingState: ${peers[from]?.signalingState}`);
   const pc = peers[from] || createPeerConnection(from, roomId);
-  try {
-    await pc.setRemoteDescription(new RTCSessionDescription(offer));
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-    console.log(`Sending answer to ${from}`);
-    socket.emit('answer', { answer, to: from, from: socket.id });
-  } catch (err) {
-    console.error('Offer handling error:', err);
+  if (pc.signalingState === 'stable') {
+    try {
+      await pc.setRemoteDescription(new RTCSessionDescription(offer));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      console.log(`Sending answer to ${from}, signalingState: ${pc.signalingState}`);
+      socket.emit('answer', { answer, to: from, from: socket.id });
+    } catch (err) {
+      console.error('Offer handling error:', err);
+    }
+  } else {
+    console.log(`Ignoring offer from ${from}, invalid signalingState: ${pc.signalingState}`);
   }
 });
 
 socket.on('answer', async ({ answer, from }) => {
   const pc = peers[from];
-  if (pc) {
+  if (pc && pc.signalingState === 'have-local-offer') {
     try {
-      console.log(`Received answer from ${from}`);
+      console.log(`Received answer from ${from}, signalingState: ${pc.signalingState}`);
       await pc.setRemoteDescription(new RTCSessionDescription(answer));
     } catch (err) {
       console.error('Answer handling error:', err);
     }
+  } else {
+    console.log(`Ignoring answer from ${from}, invalid signalingState: ${pc?.signalingState}`);
   }
 });
 
 socket.on('ice-candidate', async ({ candidate, from }) => {
   const pc = peers[from];
-  if (pc) {
+  if (pc && pc.remoteDescription) {
     try {
       await pc.addIceCandidate(new RTCIceCandidate(candidate));
       console.log(`Added ICE candidate from ${from}`);
     } catch (err) {
       console.error('ICE candidate error:', err);
     }
+  } else {
+    console.log(`Ignoring ICE candidate from ${from}, no remote description`);
   }
 });
 
@@ -287,21 +298,24 @@ socket.on('user-left', ({ userId: peerId }) => {
 
 socket.on('toggle-video', ({ userId: peerId, enabled }) => {
   const video = document.querySelector(`#video-${peerId} video`);
-  if (video) video.style.display = enabled ? 'block' : 'none';
-  console.log(`Toggle video for ${peerId}: ${enabled}`);
+  if (video) {
+    video.style.display = enabled ? 'block' : 'none';
+    console.log(`Toggle video for ${peerId}: ${enabled}`);
+  }
 });
 
 socket.on('toggle-audio', ({ userId: peerId, enabled }) => {
   const video = document.querySelector(`#video-${peerId} video`);
-  if (video) video.muted = !enabled;
-  console.log(`Toggle audio for ${peerId}: ${enabled}`);
+  if (video) {
+    video.muted = !enabled;
+    console.log(`Toggle audio for ${peerId}: ${enabled}`);
+  }
 });
 
 socket.on('screen-share', async ({ userId: peerId, enabled }) => {
   const video = document.querySelector(`#video-${peerId} video`);
   if (video) {
     if (enabled) {
-      video.srcObject = null; // Clear until new stream arrives via WebRTC
       console.log(`Screen share started for ${peerId}`);
     } else {
       video.srcObject = null;
@@ -317,6 +331,19 @@ document.getElementById('video-toggle').addEventListener('click', () => {
   document.getElementById('video-toggle').classList.toggle('disabled');
   socket.emit('toggle-video', { userId: socket.id, enabled: !enabled, roomId: document.getElementById('room-id').value });
   console.log(`Video toggle: ${!enabled}`);
+  // Trigger re-negotiation
+  Object.values(peers).forEach(async pc => {
+    if (pc.signalingState === 'stable') {
+      try {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        socket.emit('offer', { offer: pc.localDescription, to: pc.peerId, from: socket.id, roomId: document.getElementById('room-id').value });
+        console.log(`Sent re-negotiation offer for ${pc.peerId}`);
+      } catch (err) {
+        console.error('Re-negotiation error:', err);
+      }
+    }
+  });
 });
 
 document.getElementById('audio-toggle').addEventListener('click', () => {
@@ -337,7 +364,7 @@ document.getElementById('screen-share').addEventListener('click', async () => {
       const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
       if (sender) {
         sender.replaceTrack(videoTrack);
-        console.log(`Replaced video track for peer ${pc}`);
+        console.log(`Replaced video track for peer ${pc.peerId}`);
       }
     });
     document.querySelector(`#video-${socket.id} video`).srcObject = screenStream;
@@ -348,7 +375,7 @@ document.getElementById('screen-share').addEventListener('click', async () => {
         const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
         if (sender && localStream) {
           sender.replaceTrack(localStream.getVideoTracks()[0]);
-          console.log(`Restored camera track for peer ${pc}`);
+          console.log(`Restored camera track for peer ${pc.peerId}`);
         }
       });
       document.querySelector(`#video-${socket.id} video`).srcObject = localStream;
@@ -470,7 +497,6 @@ function addFile(fileName, fileUrl, userName) {
 socket.on('connect', () => console.log('Socket.IO connected'));
 socket.on('connect_error', (err) => console.error('Socket.IO error:', err));
 
-
 // const socket = io();
 // let localStream;
 // let peers = {};
@@ -550,7 +576,7 @@ socket.on('connect_error', (err) => console.error('Socket.IO error:', err));
 //       document.getElementById('auth-container').style.display = 'none';
 //       document.getElementById('room-container').style.display = 'block';
 //       document.getElementById('user-info').textContent = `Welcome, ${username}`;
-//       document.getElementById('file-upload-btn').disabled = false; // Enable file upload
+//       document.getElementById('file-upload-btn').disabled = false;
 //     } else {
 //       document.getElementById('auth-error').textContent = 'Account created! Please sign in.';
 //       toggleAuth();
@@ -566,7 +592,7 @@ socket.on('connect_error', (err) => console.error('Socket.IO error:', err));
 //   username = null;
 //   document.getElementById('room-container').style.display = 'none';
 //   document.getElementById('auth-container').style.display = 'flex';
-//   document.getElementById('file-upload-btn').disabled = true; // Disable file upload
+//   document.getElementById('file-upload-btn').disabled = true;
 //   if (localStream) {
 //     localStream.getTracks().forEach(track => track.stop());
 //     localStream = null;
@@ -584,70 +610,111 @@ socket.on('connect_error', (err) => console.error('Socket.IO error:', err));
 //   try {
 //     localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
 //     addVideoStream(socket.id, username, localStream, true);
-//     socket.emit('join-room', { roomId, userId: socket.id }, ({ users, error }) => {
+//     socket.emit('join-room', { roomId, userId: socket.id, username }, ({ users, error }) => {
 //       if (error) return alert(error);
+//       console.log('Joined room, users:', users);
 //       users.forEach(peerId => {
 //         if (peerId !== socket.id) createPeerConnection(peerId, roomId);
 //       });
 //     });
 //   } catch (err) {
 //     console.error('Error accessing media devices:', err);
-//     alert('Failed to access camera/microphone');
+//     alert('Failed to access camera/microphone. Please check permissions.');
 //   }
 // }
 
 // function addVideoStream(peerId, peerName, stream, isLocal = false) {
 //   const videoContainer = document.getElementById('video-container');
-//   const wrapper = document.createElement('div');
-//   wrapper.className = 'video-wrapper';
-//   wrapper.id = `video-${peerId}`;
-//   const video = document.createElement('video');
+//   let wrapper = document.getElementById(`video-${peerId}`);
+//   if (!wrapper) {
+//     wrapper = document.createElement('div');
+//     wrapper.className = 'video-wrapper';
+//     wrapper.id = `video-${peerId}`;
+//     const video = document.createElement('video');
+//     video.autoplay = true;
+//     video.playsinline = true;
+//     if (isLocal) video.muted = true;
+//     const label = document.createElement('div');
+//     label.className = 'video-label';
+//     label.textContent = peerName || 'Unknown';
+//     wrapper.appendChild(video);
+//     wrapper.appendChild(label);
+//     videoContainer.appendChild(wrapper);
+//   }
+//   const video = wrapper.querySelector('video');
 //   video.srcObject = stream;
-//   video.autoplay = true;
-//   video.playsinline = true;
-//   if (isLocal) video.muted = true;
-//   const label = document.createElement('div');
-//   label.className = 'video-label';
-//   label.textContent = peerName;
-//   wrapper.appendChild(video);
-//   wrapper.appendChild(label);
-//   videoContainer.appendChild(wrapper);
+//   console.log(`Added video stream for ${peerName} (${peerId}), isLocal: ${isLocal}, stream:`, stream);
 // }
 
 // function createPeerConnection(peerId, roomId) {
+//   console.log(`Creating peer connection for ${peerId} in room ${roomId}`);
 //   const pc = new RTCPeerConnection({
-//     iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+//     iceServers: [
+//       { urls: 'stun:stun.l.google.com:19302' },
+//       { urls: 'stun:stun1.l.google.com:19302' },
+//     ],
 //   });
 //   peers[peerId] = pc;
 
-//   localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
-
-//   pc.ontrack = (event) => {
-//     if (!document.getElementById(`video-${peerId}`)) {
-//       addVideoStream(peerId, peerId, event.streams[0]);
+//   // Buffer ICE candidates until remote description is set
+//   const iceCandidates = [];
+//   pc.onicecandidate = (event) => {
+//     if (event.candidate) {
+//       if (pc.remoteDescription) {
+//         socket.emit('ice-candidate', { candidate: event.candidate, to: peerId });
+//         console.log(`Sent ICE candidate to ${peerId}`);
+//       } else {
+//         iceCandidates.push(event.candidate);
+//         console.log(`Buffered ICE candidate for ${peerId}`);
+//       }
 //     }
 //   };
 
-//   pc.onicecandidate = (event) => {
-//     if (event.candidate) {
-//       socket.emit('ice-candidate', { candidate: event.candidate, to: peerId });
+//   // Add tracks
+//   if (localStream) {
+//     localStream.getTracks().forEach(track => {
+//       pc.addTrack(track, localStream);
+//       console.log(`Added track: ${track.kind} for ${peerId}`);
+//     });
+//   } else {
+//     console.error(`No local stream for ${peerId}`);
+//   }
+
+//   pc.ontrack = (event) => {
+//     console.log(`Received track for ${peerId}:`, event.streams);
+//     const stream = event.streams[0];
+//     if (stream) {
+//       const peerName = usernames.get(peerId) || peerId;
+//       addVideoStream(peerId, peerName, stream);
 //     }
 //   };
 
 //   pc.onnegotiationneeded = async () => {
 //     try {
-//       await pc.setLocalDescription(await pc.createOffer());
+//       const offer = await pc.createOffer();
+//       await pc.setLocalDescription(offer);
+//       console.log(`Sending offer to ${peerId}`);
 //       socket.emit('offer', { offer: pc.localDescription, to: peerId, from: socket.id, roomId });
 //     } catch (err) {
 //       console.error('Negotiation error:', err);
 //     }
 //   };
 
-//   pc.onconnectionstatechange = () => {
-//     if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+//   pc.oniceconnectionstatechange = () => {
+//     console.log(`ICE connection state for ${peerId}: ${pc.iceConnectionState}`);
+//     if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
 //       removeVideoStream(peerId);
 //       delete peers[peerId];
 //     }
+//   };
+
+//   // Apply buffered ICE candidates after setting remote description
+//   pc.onremotedescription = () => {
+//     iceCandidates.forEach(candidate => {
+//       socket.emit('ice-candidate', { candidate, to: peerId });
+//       console.log(`Sent buffered ICE candidate to ${peerId}`);
+//     });
+//     iceCandidates.length = 0;
 //   };
 
 //   return pc;
@@ -656,18 +723,27 @@ socket.on('connect_error', (err) => console.error('Socket.IO error:', err));
 // function removeVideoStream(peerId) {
 //   const wrapper = document.getElementById(`video-${peerId}`);
 //   if (wrapper) wrapper.remove();
+//   console.log(`Removed video stream for ${peerId}`);
 // }
 
-// socket.on('user-joined', ({ userId: peerId, socketId }) => {
-//   if (socketId !== socket.id) createPeerConnection(socketId, document.getElementById('room-id').value);
+// // Store usernames from user-joined event
+// const usernames = new Map();
+// socket.on('user-joined', ({ userId: peerId, socketId, username: peerName }) => {
+//   if (socketId !== socket.id) {
+//     usernames.set(socketId, peerName);
+//     createPeerConnection(socketId, document.getElementById('room-id').value);
+//     console.log(`User ${peerName} (${socketId}) joined`);
+//   }
 // });
 
 // socket.on('offer', async ({ offer, from, roomId }) => {
+//   console.log(`Received offer from ${from}`);
 //   const pc = peers[from] || createPeerConnection(from, roomId);
 //   try {
 //     await pc.setRemoteDescription(new RTCSessionDescription(offer));
 //     const answer = await pc.createAnswer();
 //     await pc.setLocalDescription(answer);
+//     console.log(`Sending answer to ${from}`);
 //     socket.emit('answer', { answer, to: from, from: socket.id });
 //   } catch (err) {
 //     console.error('Offer handling error:', err);
@@ -678,6 +754,7 @@ socket.on('connect_error', (err) => console.error('Socket.IO error:', err));
 //   const pc = peers[from];
 //   if (pc) {
 //     try {
+//       console.log(`Received answer from ${from}`);
 //       await pc.setRemoteDescription(new RTCSessionDescription(answer));
 //     } catch (err) {
 //       console.error('Answer handling error:', err);
@@ -687,9 +764,10 @@ socket.on('connect_error', (err) => console.error('Socket.IO error:', err));
 
 // socket.on('ice-candidate', async ({ candidate, from }) => {
 //   const pc = peers[from];
-//   if (pc && pc.remoteDescription) {
+//   if (pc) {
 //     try {
 //       await pc.addIceCandidate(new RTCIceCandidate(candidate));
+//       console.log(`Added ICE candidate from ${from}`);
 //     } catch (err) {
 //       console.error('ICE candidate error:', err);
 //     }
@@ -702,31 +780,32 @@ socket.on('connect_error', (err) => console.error('Socket.IO error:', err));
 //     peers[peerId].close();
 //     delete peers[peerId];
 //   }
+//   usernames.delete(peerId);
+//   console.log(`User ${peerId} left`);
 // });
 
 // socket.on('toggle-video', ({ userId: peerId, enabled }) => {
 //   const video = document.querySelector(`#video-${peerId} video`);
 //   if (video) video.style.display = enabled ? 'block' : 'none';
+//   console.log(`Toggle video for ${peerId}: ${enabled}`);
 // });
 
 // socket.on('toggle-audio', ({ userId: peerId, enabled }) => {
 //   const video = document.querySelector(`#video-${peerId} video`);
 //   if (video) video.muted = !enabled;
+//   console.log(`Toggle audio for ${peerId}: ${enabled}`);
 // });
 
-// socket.on('screen-share', async ({ userId: peerId, enabled, roomId }) => {
-//   if (enabled) {
-//     const video = document.querySelector(`#video-${peerId} video`);
-//     if (video) {
-//       const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-//       video.srcObject = stream;
-//       stream.getVideoTracks()[0].onended = () => {
-//         video.srcObject = null;
-//       };
+// socket.on('screen-share', async ({ userId: peerId, enabled }) => {
+//   const video = document.querySelector(`#video-${peerId} video`);
+//   if (video) {
+//     if (enabled) {
+//       video.srcObject = null; // Clear until new stream arrives via WebRTC
+//       console.log(`Screen share started for ${peerId}`);
+//     } else {
+//       video.srcObject = null;
+//       console.log(`Screen share stopped for ${peerId}`);
 //     }
-//   } else {
-//     const video = document.querySelector(`#video-${peerId} video`);
-//     if (video) video.srcObject = null;
 //   }
 // });
 
@@ -736,6 +815,7 @@ socket.on('connect_error', (err) => console.error('Socket.IO error:', err));
 //   localStream.getVideoTracks()[0].enabled = !enabled;
 //   document.getElementById('video-toggle').classList.toggle('disabled');
 //   socket.emit('toggle-video', { userId: socket.id, enabled: !enabled, roomId: document.getElementById('room-id').value });
+//   console.log(`Video toggle: ${!enabled}`);
 // });
 
 // document.getElementById('audio-toggle').addEventListener('click', () => {
@@ -744,28 +824,39 @@ socket.on('connect_error', (err) => console.error('Socket.IO error:', err));
 //   localStream.getAudioTracks()[0].enabled = !enabled;
 //   document.getElementById('audio-toggle').classList.toggle('disabled');
 //   socket.emit('toggle-audio', { userId: socket.id, enabled: !enabled, roomId: document.getElementById('room-id').value });
+//   console.log(`Audio toggle: ${!enabled}`);
 // });
 
 // document.getElementById('screen-share').addEventListener('click', async () => {
+//   if (!localStream) return;
 //   try {
 //     const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
 //     const videoTrack = screenStream.getVideoTracks()[0];
 //     Object.values(peers).forEach(pc => {
 //       const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
-//       if (sender) sender.replaceTrack(videoTrack);
+//       if (sender) {
+//         sender.replaceTrack(videoTrack);
+//         console.log(`Replaced video track for peer ${pc}`);
+//       }
 //     });
 //     document.querySelector(`#video-${socket.id} video`).srcObject = screenStream;
 //     socket.emit('screen-share', { userId: socket.id, enabled: true, roomId: document.getElementById('room-id').value });
+//     console.log('Screen share started');
 //     videoTrack.onended = () => {
 //       Object.values(peers).forEach(pc => {
 //         const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
-//         if (sender && localStream) sender.replaceTrack(localStream.getVideoTracks()[0]);
+//         if (sender && localStream) {
+//           sender.replaceTrack(localStream.getVideoTracks()[0]);
+//           console.log(`Restored camera track for peer ${pc}`);
+//         }
 //       });
 //       document.querySelector(`#video-${socket.id} video`).srcObject = localStream;
 //       socket.emit('screen-share', { userId: socket.id, enabled: false, roomId: document.getElementById('room-id').value });
+//       console.log('Screen share ended');
 //     };
 //   } catch (err) {
 //     console.error('Screen share error:', err);
+//     alert('Failed to share screen: ' + err.message);
 //   }
 // });
 
@@ -859,7 +950,8 @@ socket.on('connect_error', (err) => console.error('Socket.IO error:', err));
 // });
 
 // socket.on('file-shared', ({ fileName, fileUrl, userId: peerId }) => {
-//   addFile(fileName, fileUrl, peerId);
+//   const peerName = usernames.get(peerId) || peerId;
+//   addFile(fileName, fileUrl, peerName);
 // });
 
 // function addFile(fileName, fileUrl, userName) {
@@ -872,3 +964,9 @@ socket.on('connect_error', (err) => console.error('Socket.IO error:', err));
 //   `;
 //   filesContainer.appendChild(fileItem);
 // }
+
+// // Debug Socket.IO connection
+// socket.on('connect', () => console.log('Socket.IO connected'));
+// socket.on('connect_error', (err) => console.error('Socket.IO error:', err));
+
+
