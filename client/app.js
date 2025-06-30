@@ -77,7 +77,7 @@ async function handleAuth() {
       document.getElementById('auth-container').style.display = 'none';
       document.getElementById('room-container').style.display = 'block';
       document.getElementById('user-info').textContent = `Welcome, ${username}`;
-      document.getElementById('file-upload-btn').disabled = false; // Enable file upload
+      document.getElementById('file-upload-btn').disabled = false;
     } else {
       document.getElementById('auth-error').textContent = 'Account created! Please sign in.';
       toggleAuth();
@@ -93,7 +93,7 @@ function logout() {
   username = null;
   document.getElementById('room-container').style.display = 'none';
   document.getElementById('auth-container').style.display = 'flex';
-  document.getElementById('file-upload-btn').disabled = true; // Disable file upload
+  document.getElementById('file-upload-btn').disabled = true;
   if (localStream) {
     localStream.getTracks().forEach(track => track.stop());
     localStream = null;
@@ -111,8 +111,9 @@ async function joinRoom() {
   try {
     localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
     addVideoStream(socket.id, username, localStream, true);
-    socket.emit('join-room', { roomId, userId: socket.id }, ({ users, error }) => {
+    socket.emit('join-room', { roomId, userId: socket.id, username }, ({ users, error }) => {
       if (error) return alert(error);
+      console.log('Joined room, users:', users);
       users.forEach(peerId => {
         if (peerId !== socket.id) createPeerConnection(peerId, roomId);
       });
@@ -135,35 +136,50 @@ function addVideoStream(peerId, peerName, stream, isLocal = false) {
   if (isLocal) video.muted = true;
   const label = document.createElement('div');
   label.className = 'video-label';
-  label.textContent = peerName;
+  label.textContent = peerName || 'Unknown'; // Use username or fallback
   wrapper.appendChild(video);
   wrapper.appendChild(label);
   videoContainer.appendChild(wrapper);
+  console.log(`Added video stream for ${peerName} (${peerId}), isLocal: ${isLocal}`);
 }
 
 function createPeerConnection(peerId, roomId) {
+  console.log(`Creating peer connection for ${peerId} in room ${roomId}`);
   const pc = new RTCPeerConnection({
     iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
   });
   peers[peerId] = pc;
 
-  localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+  if (localStream) {
+    localStream.getTracks().forEach(track => {
+      pc.addTrack(track, localStream);
+      console.log(`Added track: ${track.kind} for ${peerId}`);
+    });
+  }
 
   pc.ontrack = (event) => {
+    console.log(`Received track for ${peerId}:`, event.streams);
     if (!document.getElementById(`video-${peerId}`)) {
-      addVideoStream(peerId, peerId, event.streams[0]);
+      const peerName = usernames.get(peerId) || peerId; // Use stored username
+      addVideoStream(peerId, peerName, event.streams[0]);
+    } else {
+      const video = document.querySelector(`#video-${peerId} video`);
+      if (video) video.srcObject = event.streams[0];
     }
   };
 
   pc.onicecandidate = (event) => {
     if (event.candidate) {
+      console.log(`Sending ICE candidate to ${peerId}`);
       socket.emit('ice-candidate', { candidate: event.candidate, to: peerId });
     }
   };
 
   pc.onnegotiationneeded = async () => {
     try {
-      await pc.setLocalDescription(await pc.createOffer());
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      console.log(`Sending offer to ${peerId}`);
       socket.emit('offer', { offer: pc.localDescription, to: peerId, from: socket.id, roomId });
     } catch (err) {
       console.error('Negotiation error:', err);
@@ -171,6 +187,7 @@ function createPeerConnection(peerId, roomId) {
   };
 
   pc.onconnectionstatechange = () => {
+    console.log(`Peer ${peerId} connection state: ${pc.connectionState}`);
     if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
       removeVideoStream(peerId);
       delete peers[peerId];
@@ -183,18 +200,27 @@ function createPeerConnection(peerId, roomId) {
 function removeVideoStream(peerId) {
   const wrapper = document.getElementById(`video-${peerId}`);
   if (wrapper) wrapper.remove();
+  console.log(`Removed video stream for ${peerId}`);
 }
 
-socket.on('user-joined', ({ userId: peerId, socketId }) => {
-  if (socketId !== socket.id) createPeerConnection(socketId, document.getElementById('room-id').value);
+// Store usernames from user-joined event
+const usernames = new Map();
+socket.on('user-joined', ({ userId: peerId, socketId, username: peerName }) => {
+  if (socketId !== socket.id) {
+    usernames.set(socketId, peerName);
+    createPeerConnection(socketId, document.getElementById('room-id').value);
+    console.log(`User ${peerName} (${socketId}) joined`);
+  }
 });
 
 socket.on('offer', async ({ offer, from, roomId }) => {
+  console.log(`Received offer from ${from}`);
   const pc = peers[from] || createPeerConnection(from, roomId);
   try {
     await pc.setRemoteDescription(new RTCSessionDescription(offer));
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
+    console.log(`Sending answer to ${from}`);
     socket.emit('answer', { answer, to: from, from: socket.id });
   } catch (err) {
     console.error('Offer handling error:', err);
@@ -205,6 +231,7 @@ socket.on('answer', async ({ answer, from }) => {
   const pc = peers[from];
   if (pc) {
     try {
+      console.log(`Received answer from ${from}`);
       await pc.setRemoteDescription(new RTCSessionDescription(answer));
     } catch (err) {
       console.error('Answer handling error:', err);
@@ -217,6 +244,7 @@ socket.on('ice-candidate', async ({ candidate, from }) => {
   if (pc && pc.remoteDescription) {
     try {
       await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      console.log(`Added ICE candidate from ${from}`);
     } catch (err) {
       console.error('ICE candidate error:', err);
     }
@@ -229,31 +257,39 @@ socket.on('user-left', ({ userId: peerId }) => {
     peers[peerId].close();
     delete peers[peerId];
   }
+  usernames.delete(peerId);
+  console.log(`User ${peerId} left`);
 });
 
 socket.on('toggle-video', ({ userId: peerId, enabled }) => {
   const video = document.querySelector(`#video-${peerId} video`);
   if (video) video.style.display = enabled ? 'block' : 'none';
+  console.log(`Toggle video for ${peerId}: ${enabled}`);
 });
 
 socket.on('toggle-audio', ({ userId: peerId, enabled }) => {
   const video = document.querySelector(`#video-${peerId} video`);
   if (video) video.muted = !enabled;
+  console.log(`Toggle audio for ${peerId}: ${enabled}`);
 });
 
 socket.on('screen-share', async ({ userId: peerId, enabled, roomId }) => {
-  if (enabled) {
-    const video = document.querySelector(`#video-${peerId} video`);
-    if (video) {
+  const video = document.querySelector(`#video-${peerId} video`);
+  if (enabled && video) {
+    try {
       const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
       video.srcObject = stream;
       stream.getVideoTracks()[0].onended = () => {
         video.srcObject = null;
+        console.log(`Screen share ended for ${peerId}`);
       };
+      console.log(`Screen share started for ${peerId}`);
+    } catch (err) {
+      console.error('Screen share error:', err);
     }
-  } else {
-    const video = document.querySelector(`#video-${peerId} video`);
-    if (video) video.srcObject = null;
+  } else if (video) {
+    video.srcObject = null;
+    console.log(`Screen share stopped for ${peerId}`);
   }
 });
 
@@ -263,6 +299,7 @@ document.getElementById('video-toggle').addEventListener('click', () => {
   localStream.getVideoTracks()[0].enabled = !enabled;
   document.getElementById('video-toggle').classList.toggle('disabled');
   socket.emit('toggle-video', { userId: socket.id, enabled: !enabled, roomId: document.getElementById('room-id').value });
+  console.log(`Video toggle: ${!enabled}`);
 });
 
 document.getElementById('audio-toggle').addEventListener('click', () => {
@@ -271,6 +308,7 @@ document.getElementById('audio-toggle').addEventListener('click', () => {
   localStream.getAudioTracks()[0].enabled = !enabled;
   document.getElementById('audio-toggle').classList.toggle('disabled');
   socket.emit('toggle-audio', { userId: socket.id, enabled: !enabled, roomId: document.getElementById('room-id').value });
+  console.log(`Audio toggle: ${!enabled}`);
 });
 
 document.getElementById('screen-share').addEventListener('click', async () => {
@@ -283,6 +321,7 @@ document.getElementById('screen-share').addEventListener('click', async () => {
     });
     document.querySelector(`#video-${socket.id} video`).srcObject = screenStream;
     socket.emit('screen-share', { userId: socket.id, enabled: true, roomId: document.getElementById('room-id').value });
+    console.log('Screen share started');
     videoTrack.onended = () => {
       Object.values(peers).forEach(pc => {
         const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
@@ -290,6 +329,7 @@ document.getElementById('screen-share').addEventListener('click', async () => {
       });
       document.querySelector(`#video-${socket.id} video`).srcObject = localStream;
       socket.emit('screen-share', { userId: socket.id, enabled: false, roomId: document.getElementById('room-id').value });
+      console.log('Screen share ended');
     };
   } catch (err) {
     console.error('Screen share error:', err);
@@ -386,7 +426,8 @@ document.getElementById('file-input').addEventListener('change', async (e) => {
 });
 
 socket.on('file-shared', ({ fileName, fileUrl, userId: peerId }) => {
-  addFile(fileName, fileUrl, peerId);
+  const peerName = usernames.get(peerId) || peerId;
+  addFile(fileName, fileUrl, peerName);
 });
 
 function addFile(fileName, fileUrl, userName) {
@@ -400,6 +441,9 @@ function addFile(fileName, fileUrl, userName) {
   filesContainer.appendChild(fileItem);
 }
 
+// Debug Socket.IO connection
+socket.on('connect', () => console.log('Socket.IO connected'));
+socket.on('connect_error', (err) => console.error('Socket.IO error:', err));
 
 
 
