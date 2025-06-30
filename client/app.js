@@ -120,58 +120,73 @@ async function joinRoom() {
     });
   } catch (err) {
     console.error('Error accessing media devices:', err);
-    alert('Failed to access camera/microphone');
+    alert('Failed to access camera/microphone. Please check permissions.');
   }
 }
 
 function addVideoStream(peerId, peerName, stream, isLocal = false) {
   const videoContainer = document.getElementById('video-container');
-  const wrapper = document.createElement('div');
-  wrapper.className = 'video-wrapper';
-  wrapper.id = `video-${peerId}`;
-  const video = document.createElement('video');
+  let wrapper = document.getElementById(`video-${peerId}`);
+  if (!wrapper) {
+    wrapper = document.createElement('div');
+    wrapper.className = 'video-wrapper';
+    wrapper.id = `video-${peerId}`;
+    const video = document.createElement('video');
+    video.autoplay = true;
+    video.playsinline = true;
+    if (isLocal) video.muted = true;
+    const label = document.createElement('div');
+    label.className = 'video-label';
+    label.textContent = peerName || 'Unknown';
+    wrapper.appendChild(video);
+    wrapper.appendChild(label);
+    videoContainer.appendChild(wrapper);
+  }
+  const video = wrapper.querySelector('video');
   video.srcObject = stream;
-  video.autoplay = true;
-  video.playsinline = true;
-  if (isLocal) video.muted = true;
-  const label = document.createElement('div');
-  label.className = 'video-label';
-  label.textContent = peerName || 'Unknown'; // Use username or fallback
-  wrapper.appendChild(video);
-  wrapper.appendChild(label);
-  videoContainer.appendChild(wrapper);
-  console.log(`Added video stream for ${peerName} (${peerId}), isLocal: ${isLocal}`);
+  console.log(`Added video stream for ${peerName} (${peerId}), isLocal: ${isLocal}, stream:`, stream);
 }
 
 function createPeerConnection(peerId, roomId) {
   console.log(`Creating peer connection for ${peerId} in room ${roomId}`);
   const pc = new RTCPeerConnection({
-    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+    ],
   });
   peers[peerId] = pc;
 
+  // Buffer ICE candidates until remote description is set
+  const iceCandidates = [];
+  pc.onicecandidate = (event) => {
+    if (event.candidate) {
+      if (pc.remoteDescription) {
+        socket.emit('ice-candidate', { candidate: event.candidate, to: peerId });
+        console.log(`Sent ICE candidate to ${peerId}`);
+      } else {
+        iceCandidates.push(event.candidate);
+        console.log(`Buffered ICE candidate for ${peerId}`);
+      }
+    }
+  };
+
+  // Add tracks
   if (localStream) {
     localStream.getTracks().forEach(track => {
       pc.addTrack(track, localStream);
       console.log(`Added track: ${track.kind} for ${peerId}`);
     });
+  } else {
+    console.error(`No local stream for ${peerId}`);
   }
 
   pc.ontrack = (event) => {
     console.log(`Received track for ${peerId}:`, event.streams);
-    if (!document.getElementById(`video-${peerId}`)) {
-      const peerName = usernames.get(peerId) || peerId; // Use stored username
-      addVideoStream(peerId, peerName, event.streams[0]);
-    } else {
-      const video = document.querySelector(`#video-${peerId} video`);
-      if (video) video.srcObject = event.streams[0];
-    }
-  };
-
-  pc.onicecandidate = (event) => {
-    if (event.candidate) {
-      console.log(`Sending ICE candidate to ${peerId}`);
-      socket.emit('ice-candidate', { candidate: event.candidate, to: peerId });
+    const stream = event.streams[0];
+    if (stream) {
+      const peerName = usernames.get(peerId) || peerId;
+      addVideoStream(peerId, peerName, stream);
     }
   };
 
@@ -186,12 +201,21 @@ function createPeerConnection(peerId, roomId) {
     }
   };
 
-  pc.onconnectionstatechange = () => {
-    console.log(`Peer ${peerId} connection state: ${pc.connectionState}`);
-    if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+  pc.oniceconnectionstatechange = () => {
+    console.log(`ICE connection state for ${peerId}: ${pc.iceConnectionState}`);
+    if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
       removeVideoStream(peerId);
       delete peers[peerId];
     }
+  };
+
+  // Apply buffered ICE candidates after setting remote description
+  pc.onremotedescription = () => {
+    iceCandidates.forEach(candidate => {
+      socket.emit('ice-candidate', { candidate, to: peerId });
+      console.log(`Sent buffered ICE candidate to ${peerId}`);
+    });
+    iceCandidates.length = 0;
   };
 
   return pc;
@@ -241,7 +265,7 @@ socket.on('answer', async ({ answer, from }) => {
 
 socket.on('ice-candidate', async ({ candidate, from }) => {
   const pc = peers[from];
-  if (pc && pc.remoteDescription) {
+  if (pc) {
     try {
       await pc.addIceCandidate(new RTCIceCandidate(candidate));
       console.log(`Added ICE candidate from ${from}`);
@@ -273,23 +297,16 @@ socket.on('toggle-audio', ({ userId: peerId, enabled }) => {
   console.log(`Toggle audio for ${peerId}: ${enabled}`);
 });
 
-socket.on('screen-share', async ({ userId: peerId, enabled, roomId }) => {
+socket.on('screen-share', async ({ userId: peerId, enabled }) => {
   const video = document.querySelector(`#video-${peerId} video`);
-  if (enabled && video) {
-    try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-      video.srcObject = stream;
-      stream.getVideoTracks()[0].onended = () => {
-        video.srcObject = null;
-        console.log(`Screen share ended for ${peerId}`);
-      };
+  if (video) {
+    if (enabled) {
+      video.srcObject = null; // Clear until new stream arrives via WebRTC
       console.log(`Screen share started for ${peerId}`);
-    } catch (err) {
-      console.error('Screen share error:', err);
+    } else {
+      video.srcObject = null;
+      console.log(`Screen share stopped for ${peerId}`);
     }
-  } else if (video) {
-    video.srcObject = null;
-    console.log(`Screen share stopped for ${peerId}`);
   }
 });
 
@@ -312,12 +329,16 @@ document.getElementById('audio-toggle').addEventListener('click', () => {
 });
 
 document.getElementById('screen-share').addEventListener('click', async () => {
+  if (!localStream) return;
   try {
     const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
     const videoTrack = screenStream.getVideoTracks()[0];
     Object.values(peers).forEach(pc => {
       const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
-      if (sender) sender.replaceTrack(videoTrack);
+      if (sender) {
+        sender.replaceTrack(videoTrack);
+        console.log(`Replaced video track for peer ${pc}`);
+      }
     });
     document.querySelector(`#video-${socket.id} video`).srcObject = screenStream;
     socket.emit('screen-share', { userId: socket.id, enabled: true, roomId: document.getElementById('room-id').value });
@@ -325,7 +346,10 @@ document.getElementById('screen-share').addEventListener('click', async () => {
     videoTrack.onended = () => {
       Object.values(peers).forEach(pc => {
         const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
-        if (sender && localStream) sender.replaceTrack(localStream.getVideoTracks()[0]);
+        if (sender && localStream) {
+          sender.replaceTrack(localStream.getVideoTracks()[0]);
+          console.log(`Restored camera track for peer ${pc}`);
+        }
       });
       document.querySelector(`#video-${socket.id} video`).srcObject = localStream;
       socket.emit('screen-share', { userId: socket.id, enabled: false, roomId: document.getElementById('room-id').value });
@@ -333,6 +357,7 @@ document.getElementById('screen-share').addEventListener('click', async () => {
     };
   } catch (err) {
     console.error('Screen share error:', err);
+    alert('Failed to share screen: ' + err.message);
   }
 });
 
@@ -444,7 +469,6 @@ function addFile(fileName, fileUrl, userName) {
 // Debug Socket.IO connection
 socket.on('connect', () => console.log('Socket.IO connected'));
 socket.on('connect_error', (err) => console.error('Socket.IO error:', err));
-
 
 
 // const socket = io();
