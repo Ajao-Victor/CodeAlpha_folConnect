@@ -8,15 +8,10 @@ const { authRoutes, authenticateToken } = require('./auth');
 const cors = require('cors');
 
 const app = express();
-// const serverOptions = {
-//   key: fs.readFileSync(path.join(__dirname, 'cert/server.key')),
-//   cert: fs.readFileSync(path.join(__dirname, 'cert/server.cert')),
-// };
-const server = http.createServer( app);
-const io = socketIO(server, { cors: { origin: '*' } });
+const server = http.createServer(app);
+const io = socketIO(server, { cors: { origin: process.env.CLIENT_URL || '*' } });
 
-// repair 19-23
-const fs = require('fs');
+// Ensure Uploads folder exists
 const uploadDir = path.join(__dirname, 'Uploads');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
@@ -25,25 +20,23 @@ if (!fs.existsSync(uploadDir)) {
 app.use(express.json());
 app.use(cors());
 app.use(express.static(path.join(__dirname, '../client')));
-// repair to update uploads to uploadDir
-app.use('/uploads', express.static(path.join(__dirname, 'uploaddir')));
-
+app.use('/uploads', express.static(uploadDir));
 
 app.use('/auth', authRoutes);
 app.get('/room/:roomId', (req, res) => {
-    res.sendFile(path.join(__dirname, '../client/index.html'));
+  res.sendFile(path.join(__dirname, '../client/index.html'));
 });
 
-// File Upload Setup... changed uploads to uplohadDir
+// File Upload Setup
 const storage = multer.diskStorage({
-  destination: './UploadDir/',
+  destination: uploadDir,
   filename: (req, file, cb) => {
     cb(null, `${Date.now()}-${file.originalname}`);
   },
 });
 const upload = multer({ storage });
 
-// Socket.IO Logic path in the server
+// Socket.IO Logic
 const rooms = new Map();
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
@@ -74,7 +67,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('ice-candidate', ({ candidate, to }) => {
-    socket.to(to).emit('ice-candidate', { candidate });
+    socket.to(to).emit('ice-candidate', { candidate, from: socket.id });
   });
 
   socket.on('toggle-video', ({ userId, enabled, roomId }) => {
@@ -90,7 +83,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('whiteboard-update', ({ data, roomId }) => {
-    socket.to(roomId).emit('whiteboard-update', data);
+    socket.to(roomId).emit('whiteboard-update', { data, roomId });
   });
 
   socket.on('file-shared', ({ fileName, fileUrl, userId, roomId }) => {
@@ -110,15 +103,6 @@ io.on('connection', (socket) => {
 });
 
 // File Upload Route
-// app.post('/upload', authenticateToken, upload.single('file'), async (req, res) => {
-//   try {
-//     const fileUrl = `/uploads/${req.file.filename}`;
-//     res.json({ fileUrl, fileName: req.file.originalname });
-//   } catch (err) {
-//     console.error('File upload error:', err);
-//     res.status(500).json({ error: 'Failed to upload file' });
-//   }
-// });
 app.post('/upload', authenticateToken, upload.single('file'), async (req, res) => {
   try {
     const fileUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
@@ -132,7 +116,7 @@ app.post('/upload', authenticateToken, upload.single('file'), async (req, res) =
 // Start Server
 const PORT = process.env.PORT || 8080;
 server.listen(PORT, () => {
-  console.log(`Server running on https://localhost:${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
 
 
