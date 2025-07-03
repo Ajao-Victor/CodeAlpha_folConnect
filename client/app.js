@@ -197,6 +197,7 @@
 
 //   pc.onnegotiationneeded = async () => {
 //     if (pc.signalingState === 'stable') {
+//       await new Promise(resolve => setTimeout(resolve, socket.id < peerId ? 100 : 200));
 //       try {
 //         const offer = await pc.createOffer();
 //         await pc.setLocalDescription(offer);
@@ -229,7 +230,7 @@
 // }
 
 // function removeVideoStream(peerId) {
-//   const wrapper = document.getElementById(`video-${kl}`);
+//   const wrapper = document.getElementById(`video-${peerId}`);
 //   if (wrapper) wrapper.remove();
 //   console.log(`Removed video stream for ${peerId}`);
 // }
@@ -242,6 +243,26 @@
 //     usernames.set(socketId, peerName);
 //     createPeerConnection(socketId, document.getElementById('room-id').value);
 //     console.log(`User ${peerName} (${socketId}) joined`);
+//   }
+// });
+
+// socket.on('new-user-joined', ({ userId: peerId, username: peerName, roomId }) => {
+//   if (peerId !== socket.id) {
+//     usernames.set(peerId, peerName);
+//     const pc = peers[peerId] || createPeerConnection(peerId, roomId);
+//     if (localStream && pc.signalingState === 'stable') {
+//       localStream.getTracks().forEach(track => {
+//         pc.addTrack(track, localStream);
+//         console.log(`Re-added track: ${track.kind} for ${peerId} on new-user-joined`);
+//       });
+//       pc.createOffer()
+//         .then(offer => pc.setLocalDescription(offer))
+//         .then(() => {
+//           socket.emit('offer', { offer: pc.localDescription, to: peerId, from: socket.id, roomId });
+//           console.log(`Sent offer to new joiner ${peerId}`);
+//         })
+//         .catch(err => console.error('New user offer error:', err));
+//     }
 //   }
 // });
 
@@ -542,6 +563,9 @@
 // socket.on('connect', () => console.log('Socket.IO connected'));
 // socket.on('connect_error', (err) => console.error('Socket.IO error:', err));
 
+
+
+
 const socket = io();
 let localStream;
 let peers = {};
@@ -741,7 +765,7 @@ function createPeerConnection(peerId, roomId) {
 
   pc.onnegotiationneeded = async () => {
     if (pc.signalingState === 'stable') {
-      await new Promise(resolve => setTimeout(resolve, socket.id < peerId ? 100 : 200));
+      await new Promise(resolve => setTimeout(resolve, socket.id < peerId ? 100 : 300));
       try {
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
@@ -792,20 +816,29 @@ socket.on('user-joined', ({ userId: peerId, socketId, username: peerName }) => {
 
 socket.on('new-user-joined', ({ userId: peerId, username: peerName, roomId }) => {
   if (peerId !== socket.id) {
+    console.log(`New user joined: ${peerName} (${peerId}) in room ${roomId}`);
     usernames.set(peerId, peerName);
-    const pc = peers[peerId] || createPeerConnection(peerId, roomId);
+    if (peers[peerId]) {
+      peers[peerId].close();
+      delete peers[peerId];
+    }
+    const pc = createPeerConnection(peerId, roomId);
     if (localStream && pc.signalingState === 'stable') {
       localStream.getTracks().forEach(track => {
         pc.addTrack(track, localStream);
         console.log(`Re-added track: ${track.kind} for ${peerId} on new-user-joined`);
       });
-      pc.createOffer()
-        .then(offer => pc.setLocalDescription(offer))
-        .then(() => {
-          socket.emit('offer', { offer: pc.localDescription, to: peerId, from: socket.id, roomId });
-          console.log(`Sent offer to new joiner ${peerId}`);
-        })
-        .catch(err => console.error('New user offer error:', err));
+      setTimeout(() => {
+        if (pc.signalingState === 'stable') {
+          pc.createOffer()
+            .then(offer => pc.setLocalDescription(offer))
+            .then(() => {
+              socket.emit('offer', { offer: pc.localDescription, to: peerId, from: socket.id, roomId });
+              console.log(`Sent offer to new joiner ${peerId}`);
+            })
+            .catch(err => console.error('New user offer error:', err));
+        }
+      }, 500);
     }
   }
 });
@@ -813,54 +846,44 @@ socket.on('new-user-joined', ({ userId: peerId, username: peerName, roomId }) =>
 socket.on('offer', async ({ offer, from, roomId }) => {
   console.log(`Received offer from ${from}, signalingState: ${peers[from]?.signalingState}`);
   const pc = peers[from] || createPeerConnection(from, roomId);
-  if (pc.signalingState === 'stable') {
-    try {
+  try {
+    if (pc.signalingState === 'stable') {
       await pc.setRemoteDescription(new RTCSessionDescription(offer));
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       console.log(`Sending answer to ${from}, signalingState: ${pc.signalingState}`);
       socket.emit('answer', { answer, to: from, from: socket.id });
-    } catch (err) {
-      console.error('Offer handling error:', err);
+    } else if (pc.signalingState === 'have-local-offer') {
+      console.log(`Offer collision from ${from}, buffering offer`);
+      bufferedOffers.set(from, { offer, roomId });
     }
-  } else if (pc.signalingState === 'have-local-offer' && socket.id < from) {
-    console.log(`Offer collision from ${from}, rolling back as ${socket.id} has priority`);
-    try {
-      await pc.setLocalDescription(new RTCSessionDescription({ type: 'rollback' }));
-      await pc.setRemoteDescription(new RTCSessionDescription(offer));
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      console.log(`Sending answer to ${from} after rollback, signalingState: ${pc.signalingState}`);
-      socket.emit('answer', { answer, to: from, from: socket.id });
-    } catch (err) {
-      console.error('Rollback error:', err);
-    }
-  } else {
-    console.log(`Buffering offer from ${from}, signalingState: ${pc.signalingState}`);
-    bufferedOffers.set(from, { offer, roomId });
+  } catch (err) {
+    console.error('Offer handling error:', err);
   }
 });
 
 socket.on('answer', async ({ answer, from }) => {
   const pc = peers[from];
-  if (pc && (pc.signalingState === 'have-local-offer' || (pc.signalingState === 'stable' && bufferedOffers.has(from)))) {
+  if (pc) {
     try {
       console.log(`Received answer from ${from}, signalingState: ${pc.signalingState}`);
       await pc.setRemoteDescription(new RTCSessionDescription(answer));
       if (bufferedOffers.has(from)) {
         const { offer, roomId } = bufferedOffers.get(from);
         console.log(`Retrying buffered offer from ${from}`);
-        await pc.setRemoteDescription(new RTCSessionDescription(offer));
-        const newAnswer = await pc.createAnswer();
-        await pc.setLocalDescription(newAnswer);
-        socket.emit('answer', { answer: newAnswer, to: from, from: socket.id });
-        bufferedOffers.delete(from);
+        if (pc.signalingState === 'stable') {
+          await pc.setRemoteDescription(new RTCSessionDescription(offer));
+          const newAnswer = await pc.createAnswer();
+          await pc.setLocalDescription(newAnswer);
+          socket.emit('answer', { answer: newAnswer, to: from, from: socket.id });
+          bufferedOffers.delete(from);
+        }
       }
     } catch (err) {
       console.error('Answer handling error:', err);
     }
   } else {
-    console.log(`Ignoring answer from ${from}, invalid signalingState: ${pc?.signalingState}`);
+    console.log(`Ignoring answer from ${from}, no peer connection`);
   }
 });
 
