@@ -55,8 +55,8 @@ const socket = io({
     title.textContent = isSignIn ? 'Sign Up' : 'Sign In';
     document.getElementById('username').style.display = isSignIn ? 'block' : 'none';
     toggle.innerHTML = isSignIn
-      ? 'Already have an account? <a href="#" onclick="toggleAuth()">Sign In</a>'
-      : 'Don\'t have an account? <a href="#" onclick="toggleAuth()">Sign Up</a>';
+      ? 'Already have an account? <a  onclick="toggleAuth()">Sign In</a>'
+      : 'Don\'t have an account? <a  onclick="toggleAuth()">Sign Up</a>';
     document.getElementById('auth-error').textContent = '';
   }
   
