@@ -17,7 +17,7 @@
             <input type="email" id="email" placeholder="Email" required>
             <input type="password" id="password" placeholder="Password" required>
             <button onclick="handleAuth()">Sign In</button>
-            <p id="auth-toggle">Don't have an account? <a href="#" onclick="toggleAuth()">Sign Up</a></p>
+            <p id="auth-toggle">Don't have an account? <a href="signup" onclick="toggleAuth()">Sign Up</a></p>
             <p id="auth-error"></p>
         </div>
     </div>
@@ -53,56 +53,3 @@
 </body>
 </html>
 
-
-
-<!-- <!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>folConnect</title>
-    <link rel="icon" type="image/png" href="./logo.png">
-    <link rel="stylesheet" href="./style.css">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
-</head>
-<body>
- 
-
-    <div id="auth-container">
-        <h1>folConnect</h1>
-        <div id="auth-form">
-            <h2 id="auth-title">Sign In</h2>
-            <input type="text" id="username" placeholder="Username" required>
-            <input type="email" id="email" placeholder="Email" required>
-            <input type="password" id="password" placeholder="Password" required>
-            <button onclick="handleAuth()">Sign In</button>
-            <p id="auth-toggle">Don't have an account? <a href="#" onclick="toggleAuth()">Sign Up</a></p>
-            <p id="auth-error"></p>
-        </div>
-    </div>
-    <div id="room-container" style="display: none;">
-        <nav>
-            <img src="./logo.png" alt="ConnectSphere Logo" class="logo">
-            <span id="user-info"></span>
-            <button onclick="logout()">Logout</button>
-        </nav>
-        <div class="room-input">
-            <input type="text" id="room-id" placeholder="Enter Room ID">
-            <button onclick="joinRoom()">Join Room</button>
-        </div>
-        <div id="video-container"></div>
-        <div class="controls">
-            <button id="video-toggle"><i class="fas fa-video"></i></button>
-            <button id="audio-toggle"><i class="fas fa-microphone"></i></button>
-            <button id="screen-share"><i class="fas fa-desktop"></i></button>
-            <button id="whiteboard-toggle"><i class="fas fa-chalkboard"></i></button>
-            <input type="file" id="file-input" style="display: none;">
-            <button onclick="document.getElementById('file-input').click()"><i class="fas fa-file-upload"></i></button>
-        </div>
-        <canvas id="whiteboard" style="display: none;"></canvas>
-        <div id="files-container"></div>
-    </div>
-    <script src="/socket.io/socket.io.js"></script>
-    <script src="./app.js"></script>
-</body>
-</html> -->
